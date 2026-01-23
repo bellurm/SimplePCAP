@@ -38,10 +38,18 @@ NTLM_TXT="$OUTDIR/ntlm.txt"
 DNS_TXT="$OUTDIR/dns.txt"
 GENERIC_TXT="$OUTDIR/generic_creds.txt"
 SUMMARY_TXT="$OUTDIR/summary.txt"
+SUCCESS_TXT="$OUTDIR/successful_logins.txt"
 
 echo "[+] Pcap:   $PCAP"
 echo "[+] Output: $OUTDIR"
 echo "[+] Tshark: $(tshark -v | head -n1)"
+
+# Global successful/used credentials summary (heuristic)
+> "$SUCCESS_TXT"
+echo "==========================" >> "$SUCCESS_TXT"
+echo " SUCCESSFUL / USED CREDENTIALS (heuristic)" >> "$SUCCESS_TXT"
+echo "==========================" >> "$SUCCESS_TXT"
+
 
 ########################################
 # HTTP
@@ -126,7 +134,7 @@ tshark -r "$PCAP" \
   -E separator=$'\t' \
   -E quote=n \
   -E occurrence=f 2>/dev/null \
-| awk -F'\t' '
+| awk -F'\t' -v succ="$SUCCESS_TXT" '
   function trimq(s) {
     gsub(/^"|"$/, "", s); return s;
   }
@@ -143,6 +151,11 @@ tshark -r "$PCAP" \
       cmd | getline dec; close(cmd);
       if (dec != "") {
         printf "  Decoded (Basic): %s\n", dec;
+        # Kullanılan HTTP Basic credential’ı özet dosyasına yaz
+        printf "HTTP_BASIC\t%s\thttp://%s%s\n",
+               dec,
+               (host==""?"-":host),
+               (uri==""?"/":uri) >> succ;
       }
     }
   }
@@ -222,6 +235,7 @@ echo "==================" >> "$FTP_TXT"
 echo " FTP COMMANDS"     >> "$FTP_TXT"
 echo "==================" >> "$FTP_TXT"
 
+# Önce USER/PASS komutlarını listeleyelim
 tshark -r "$PCAP" \
   -Y 'ftp.request.command == "USER" || ftp.request.command == "PASS"' \
   -T fields \
@@ -242,7 +256,63 @@ tshark -r "$PCAP" \
   }
 ' >> "$FTP_TXT" || true
 
+echo "" >> "$FTP_TXT"
+echo "==========================" >> "$FTP_TXT"
+echo " FTP SUCCESSFUL LOGINS (heuristic)" >> "$FTP_TXT"
+echo "==========================" >> "$FTP_TXT"
+
+# Burada FTP response code 230 (Login successful) üzerinden
+# TÜM başarılı login’leri tespit ediyoruz.
+FTP_SUCCESS_LINE="$(
+  tshark -r "$PCAP" \
+    -Y "ftp" \
+    -T fields \
+    -e frame.number \
+    -e tcp.stream \
+    -e ip.src \
+    -e ip.dst \
+    -e ftp.request.command \
+    -e ftp.request.arg \
+    -e ftp.response.code \
+    -e ftp.response.arg \
+    -E header=n \
+    -E separator=$'\t' \
+    -E quote=n \
+    -E occurrence=f 2>/dev/null \
+  | awk -F'\t' -v succ="$SUCCESS_TXT" '
+      {
+        frame=$1; stream=$2; src=$3; dst=$4;
+        cmd=$5; arg=$6; code=$7; rarg=$8;
+
+        # Stream bazlı son USER/PASS değerlerini tut
+        if (cmd == "USER" && arg != "") {
+          user[stream] = arg;
+        } else if (cmd == "PASS" && arg != "") {
+          pass[stream] = arg;
+        }
+
+        # 230 -> successful login
+        if (code == "230") {
+          u = (stream in user ? user[stream] : "?");
+          p = (stream in pass ? pass[stream] : "?");
+          line = sprintf("[SUCCESS] stream=%s frame=%s %s -> %s USER=%s PASS=%s (%s)",
+                         stream, frame, src, dst, u, p, rarg);
+          print line;                               # stdout (tee için)
+          printf "FTP\t%s\t%s\t%s->%s\tstream=%s\tframe=%s\n",
+                 u, p, src, dst, stream, frame >> succ;  # global başarı dosyası
+        }
+      }
+    ' \
+  | tee -a "$FTP_TXT" \
+  | head -n1 \
+  || true
+)"
+
 echo "    -> $FTP_TXT"
+
+if [[ -n "$FTP_SUCCESS_LINE" ]]; then
+  echo "[+] FTP first successful login (heuristic): $FTP_SUCCESS_LINE"
+fi
 
 ########################################
 # NTLM (SMB/HTTP)
@@ -421,7 +491,7 @@ echo "[+] SUMMARY..."
   echo "[NTLM        ] $(grep -c '^\[Frame' "$NTLM_TXT"        2>/dev/null) lines"
   echo "[DNS         ] $(grep -c '^\[Frame' "$DNS_TXT"         2>/dev/null) lines"
   echo "[GENERIC KW  ] $(grep -c '^\[Frame' "$GENERIC_TXT"     2>/dev/null) lines"
+  echo "[SUCCESS LOG ] $(grep -c '^[A-Z]'   "$SUCCESS_TXT"     2>/dev/null) lines"
 } >> "$SUMMARY_TXT"
 
-echo "    -> $SUMMARY_TXT"
 echo "[+] Done."
