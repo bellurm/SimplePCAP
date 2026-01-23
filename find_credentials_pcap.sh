@@ -3,7 +3,6 @@
 # Usage:
 #   ./find_credentials_pcap.sh trace.pcap
 
-
 set -euo pipefail
 
 usage() {
@@ -39,6 +38,7 @@ DNS_TXT="$OUTDIR/dns.txt"
 GENERIC_TXT="$OUTDIR/generic_creds.txt"
 SUMMARY_TXT="$OUTDIR/summary.txt"
 SUCCESS_TXT="$OUTDIR/successful_logins.txt"
+PATTERN_TXT="$OUTDIR/patterns.txt"
 
 echo "[+] Pcap:   $PCAP"
 echo "[+] Output: $OUTDIR"
@@ -49,7 +49,6 @@ echo "[+] Tshark: $(tshark -v | head -n1)"
 echo "==========================" >> "$SUCCESS_TXT"
 echo " SUCCESSFUL / USED CREDENTIALS (heuristic)" >> "$SUCCESS_TXT"
 echo "==========================" >> "$SUCCESS_TXT"
-
 
 ########################################
 # HTTP
@@ -476,6 +475,50 @@ done
 echo "    -> $GENERIC_TXT"
 
 ########################################
+# Strings-based pattern hunting (URL/email/base64/JWT)
+########################################
+echo "[+] Pattern hunting (URL/email/base64/JWT)..."
+> "$PATTERN_TXT"
+
+echo "==========================" >> "$PATTERN_TXT"
+echo " STRINGS-BASED PATTERN HUNTING" >> "$PATTERN_TXT"
+echo "==========================" >> "$PATTERN_TXT"
+
+# 1) URL'ler
+echo "" >> "$PATTERN_TXT"
+echo "---------- URLs ----------" >> "$PATTERN_TXT"
+
+strings "$PCAP" 2>/dev/null \
+  | grep -Ei 'https?://[A-Za-z0-9._:/?#@%&=+,\-]+' \
+  | sort -u >> "$PATTERN_TXT" || true
+
+# 2) E-posta adresleri
+echo "" >> "$PATTERN_TXT"
+echo "-------- EMAILs ----------" >> "$PATTERN_TXT"
+
+strings "$PCAP" 2>/dev/null \
+  | grep -E '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' \
+  | sort -u >> "$PATTERN_TXT" || true
+
+# 3) Base64 benzeri stringler (muhtemel token / secret)
+echo "" >> "$PATTERN_TXT"
+echo "------ BASE64-ish --------" >> "$PATTERN_TXT"
+
+strings "$PCAP" 2>/dev/null \
+  | grep -E '^[A-Za-z0-9+/]{20,}={0,2}$' \
+  | sort -u >> "$PATTERN_TXT" || true
+
+# 4) JWT benzeri (eyJ... . .... . .... )
+echo "" >> "$PATTERN_TXT"
+echo "--------- JWTs -----------" >> "$PATTERN_TXT"
+
+strings "$PCAP" 2>/dev/null \
+  | grep -E 'eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9._-]*\.[A-Za-z0-9._-]*' \
+  | sort -u >> "$PATTERN_TXT" || true
+
+echo "    -> $PATTERN_TXT"
+
+########################################
 # SUMMARY
 ########################################
 echo "[+] SUMMARY..."
@@ -492,6 +535,7 @@ echo "[+] SUMMARY..."
   echo "[DNS         ] $(grep -c '^\[Frame' "$DNS_TXT"         2>/dev/null) lines"
   echo "[GENERIC KW  ] $(grep -c '^\[Frame' "$GENERIC_TXT"     2>/dev/null) lines"
   echo "[SUCCESS LOG ] $(grep -c '^[A-Z]'   "$SUCCESS_TXT"     2>/dev/null) lines"
+  echo "[PATTERNS    ] $(grep -c '.'         "$PATTERN_TXT"     2>/dev/null) lines"
 } >> "$SUMMARY_TXT"
 
 echo "[+] Done."
