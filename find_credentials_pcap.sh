@@ -4,6 +4,7 @@
 #   ./find_credentials_pcap.sh trace.pcap
 
 set -euo pipefail
+umask 077
 
 usage() {
   echo "Usage: $0 <pcap*_file>"
@@ -27,8 +28,7 @@ fi
 
 BASENAME="$(basename "$PCAP")"
 BASENAME_NOEXT="${BASENAME%.*}"
-OUTDIR="pcap_loot_${BASENAME_NOEXT}"
-mkdir -p "$OUTDIR"
+OUTDIR="$(mktemp -d "./pcap_loot_${BASENAME_NOEXT}.XXXXXX")"
 
 HTTP_TXT="$OUTDIR/http.txt"
 HTTP_COOKIE_TXT="$OUTDIR/http_cookies.txt"
@@ -46,14 +46,17 @@ PORTS_TXT="$OUTDIR/ports.txt"
 WINRM_TXT="$OUTDIR/winrm_streams.txt"
 FLAG_TXT="$OUTDIR/flags_guess.txt"
 
+# Fail before producing a misleading report for an unreadable capture.
+tshark -r "$PCAP" -c 1 -T fields -e frame.number >/dev/null
+
 echo "[+] Pcap:   $PCAP"
 echo "[+] Output: $OUTDIR"
-echo "[+] Tshark: $(tshark -v | head -n1)"
+echo "[+] Tshark: $(tshark -v | sed -n '1p')"
 
 # Global successful/used credentials summary (heuristic)
 > "$SUCCESS_TXT"
 echo "==========================" >> "$SUCCESS_TXT"
-echo " SUCCESSFUL / USED CREDENTIALS (heuristic)" >> "$SUCCESS_TXT"
+echo " OBSERVED CREDENTIALS / FTP SUCCESS RESPONSES (heuristic)" >> "$SUCCESS_TXT"
 echo "==========================" >> "$SUCCESS_TXT"
 
 ########################################
@@ -68,7 +71,7 @@ echo "==========================" >> "$PORTS_TXT"
 
 tshark -r "$PCAP" \
   -Y "tcp.flags.syn == 1 && tcp.flags.ack == 1" \
-  -T fields -e tcp.dstport 2>/dev/null \
+  -T fields -e tcp.srcport 2>/dev/null \
 | sort -nu >> "$PORTS_TXT" || true
 
 echo "    -> $PORTS_TXT"
@@ -168,8 +171,9 @@ tshark -r "$PCAP" \
     printf "\n[Frame #%s] %s -> %s\n", frame, src, dst;
     printf "  URL: http://%s%s\n", (host==""?"-":host), (uri==""?"/":uri);
     printf "  Authorization: %s\n", auth;
-    if (scheme == "Basic" && b64 != "") {
-      cmd = "echo " b64 " | base64 -d 2>/dev/null";
+    if (scheme == "Basic" && b64 != "" && b64 ~ /^[A-Za-z0-9+\/=]+$/ && length(b64) % 4 == 0) {
+      dec = "";
+      cmd = "printf %s " b64 " | base64 -d 2>/dev/null";
       cmd | getline dec; close(cmd);
       if (dec != "") {
         printf "  Decoded (Basic): %s\n", dec;
@@ -326,7 +330,7 @@ FTP_SUCCESS_LINE="$(
       }
     ' \
   | tee -a "$FTP_TXT" \
-  | head -n1 \
+  | sed -n '1p' \
   || true
 )"
 
@@ -410,7 +414,9 @@ tshark -r "$PCAP" \
     if (user != "" && resp != "") {
       c = challenge[stream]
       if (c != "") {
-        printf "%s::%s:%s:%s\n", user, dom, c, resp >> out
+        gsub(":", "", resp)
+        if (c ~ /^[0-9A-Fa-f]+$/ && length(c) == 16 && resp ~ /^[0-9A-Fa-f]+$/ && length(resp) > 32 && length(resp) % 2 == 0)
+          printf "%s::%s:%s:%s:%s\n", user, dom, c, substr(resp, 1, 32), substr(resp, 33) >> out
       }
     }
   }
@@ -511,7 +517,7 @@ tshark -r "$PCAP" \
 
     # hex dışında her şeyi temizle
     gsub(/[^0-9A-Fa-f]/, "", cipher);
-    if (cipher == "") next;
+    if (length(cipher) <= 32 || length(cipher) % 2 != 0) next;
 
     checksum = substr(cipher, 1, 32);
     enc      = substr(cipher, 33);
